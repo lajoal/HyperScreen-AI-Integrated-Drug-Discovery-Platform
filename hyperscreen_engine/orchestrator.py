@@ -12,8 +12,8 @@ from prep_parallel import run_prep_parallel
 from config import *
 
 
-def check_stop_signal(result_dir):
-    """중단 신호(stop.flag) 파일이 있는지 확인"""
+def check_stop_signal(result_dir: str) -> bool:
+    """Check whether a stop signal file (stop.flag) exists in the result directory."""
     return os.path.exists(os.path.join(result_dir, "stop.flag"))
 
 
@@ -30,48 +30,122 @@ def main():
 
     os.makedirs(result_dir, exist_ok=True)
 
-    # 1) Load and filter the library (MW >= 200)
+    # ======================================================
+    # Step 1) Load and filter the library (organic drug-like only)
+    # ======================================================
     df = pd.read_csv(library_csv)
 
-    def is_valid(s):
+    if "SMILES" not in df.columns:
+        print("❌ 'SMILES' column not found in the library CSV.")
+        sys.exit(0)
+
+    def _guess_name_col(_df: pd.DataFrame) -> str:
+        """Guess a reasonable compound-name column if present."""
+        candidates = [
+            "Compound_Name", "COMPOUND_NAME", "compound_name",
+            "Compound", "COMPOUND", "Name", "NAME", "Drug", "DRUG",
+        ]
+        for c in candidates:
+            if c in _df.columns:
+                return c
+        return ""
+
+    name_col = _guess_name_col(df)
+
+    def is_valid(smiles, name=None) -> bool:
+        """
+        Keep organic, drug-like small molecules only.
+        Exclude inorganic salts, metals, and radiopharmaceuticals (e.g., Ra-223 / Xofigo).
+        """
         try:
-            m = Chem.MolFromSmiles(str(s))
-            return Descriptors.MolWt(m) >= 200 if m else False
+            if smiles is None:
+                return False
+
+            smi = str(smiles).strip()
+            if not smi:
+                return False
+
+            nm = (str(name).upper().strip() if name is not None else "")
+
+            # 1) Name-based hard exclusions (radiopharmaceuticals / radionuclides)
+            bad_keywords = [
+                "RADIUM", "RA-223", "RA 223", "XOFIGO",
+                "RADIO", "RADIONUCL", "RADIONUCLIDE",
+                "I-131", "I 131", "IODINE-131", "IODINE 131",
+                "Y-90", "Y 90", "LU-177", "LU 177",
+                "TC-99", "TC 99", "TECHNETIUM-99", "TECHNETIUM 99",
+            ]
+            if nm and any(k in nm for k in bad_keywords):
+                return False
+
+            m = Chem.MolFromSmiles(smi)
+            if m is None:
+                return False
+
+            # 2) Must contain carbon (organic-like)
+            if not any(a.GetAtomicNum() == 6 for a in m.GetAtoms()):
+                return False
+
+            # 3) Exclude metals / non-organic atoms using an allowed atom set
+            # Common organic atoms: H, C, N, O, F, P, S, Cl, Br, I
+            allowed = {1, 6, 7, 8, 9, 15, 16, 17, 35, 53}
+            for a in m.GetAtoms():
+                if a.GetAtomicNum() not in allowed:
+                    return False
+
+            # 4) Exclude tiny fragments (prevents small ions/fragments)
+            if m.GetNumHeavyAtoms() < 8:
+                return False
+
+            # 5) Keep the MW criterion (>= 200)
+            return Descriptors.MolWt(m) >= 200
+
         except Exception:
             return False
 
-    print("Step 1: Filtering library (MW >= 200)...")
-    df = df[df["SMILES"].apply(is_valid)].reset_index(drop=True)
+    print("Step 1: Filtering library (organic drug-like only, MW >= 200)...")
+    if name_col:
+        df = df[df.apply(lambda r: is_valid(r.get("SMILES"), r.get(name_col)), axis=1)].reset_index(drop=True)
+    else:
+        df = df[df["SMILES"].apply(lambda s: is_valid(s, None))].reset_index(drop=True)
 
     if len(df) == 0:
         print("❌ No valid molecules found after filtering.")
         sys.exit(0)
 
-    # 2. PREP
+    # ======================================================
+    # Step 2) PREP
+    # ======================================================
     if check_stop_signal(result_dir):
         sys.exit(0)
 
     print("Step 2: Starting PREP...")
     df = run_prep_parallel(df, os.path.join(result_dir, "ligands"))
 
-    # 3. DOCKING
+    # ======================================================
+    # Step 3) DOCKING
+    # ======================================================
     if check_stop_signal(result_dir):
         sys.exit(0)
 
     print("Step 3: Starting DOCKING (GNINA)...")
     df = run_docking_parallel(df, receptor, cx, cy, cz, result_dir)
 
-    # 4. SCORING
-    print("Step 4: Computing Composite Scores...")
+    # ======================================================
+    # Step 4) SCORING
+    # ======================================================
+    print("Step 4: Computing composite scores...")
     df = compute_composite(df)
 
-    # 5. MD surrogate (top 10 only)
-    # - opt_rmsd: raw RMSD stored for internal use (fallback = 0.0001)
-    # - md_score : normalized score (not computed = 0.0)
-    # - opt_rmsd_display: display-only value (not computed = NA)
+    # ======================================================
+    # Step 5) Post-optimization (top 10 only)
+    # ======================================================
+    # opt_rmsd: internal raw RMSD (fallback sentinel = 0.0001)
+    # md_score: normalized score (not computed = 0.0)
+    # opt_rmsd_display: display-only value (not computed = NA)
     df["opt_rmsd"] = 0.0001
     df["md_score"] = 0.0
-    df["opt_rmsd_display"] = pd.NA  # Display-only column (initially NA)
+    df["opt_rmsd_display"] = pd.NA
 
     top_n = min(len(df), 10)
     df_md = df.nlargest(top_n, "composite_score")
@@ -79,7 +153,7 @@ def main():
     md_dir = os.path.join(result_dir, "md")
     os.makedirs(md_dir, exist_ok=True)
 
-    print(f"Step 5: Starting Ligand Geometry Optimization for top {top_n} candidates...")
+    print(f"Step 5: Running ligand geometry optimization for top {top_n} candidates...")
     for idx, row in df_md.iterrows():
         if check_stop_signal(result_dir):
             break
@@ -90,8 +164,7 @@ def main():
         if pose and os.path.exists(pose):
             val = run_md(pose, md_dir, receptor, smiles=smiles)
 
-            # Guard against run_md fallback/sentinel values
-            # Treat 0.0001 / 0.001 as failure/abnormal sentinels and set md_score = 0
+            # Guard against fallback/sentinel values
             if val is None or float(val) <= 0.0011:
                 df.at[idx, "opt_rmsd"] = 0.0001
                 df.at[idx, "md_score"] = 0.0
@@ -104,42 +177,39 @@ def main():
                 val = float(val)
                 df.at[idx, "opt_rmsd"] = val
 
-                # md_score: higher when RMSD is smaller (roughly 0..1)
                 md_score = float(np.exp(-val / 2.0))
                 df.at[idx, "md_score"] = md_score
-
-                # For display, only keep values that were actually computed
                 df.at[idx, "opt_rmsd_display"] = round(val, 4)
 
                 print(
                     f"   > Optimization completed for {row.get('Compound_Name', idx)}: "
-                    f"RMSD = {val:.4f}, md_score = {md_score:.4f}"
+                    f"RMSD={val:.4f}, md_score={md_score:.4f}"
                 )
         else:
-            # Keep fallback (not computed)
             df.at[idx, "opt_rmsd"] = 0.0001
             df.at[idx, "md_score"] = 0.0
             df.at[idx, "opt_rmsd_display"] = pd.NA
             print(f"   > Optimization skipped for {row.get('Compound_Name', idx)}: pose not found")
 
-        # Keep incremental saving (preserve existing behavior)
-        # The display column is saved together
+        # Incremental save (keeps the original behavior)
         df.to_csv(os.path.join(result_dir, "Final_AutoPipeline.csv"), index=False)
 
-    # Safely post-process display column (in case any rows were missed)
-    # If md_score <= 0, set the display value to NA
+    # Safety pass for display column
     df["opt_rmsd_display"] = df["opt_rmsd_display"].astype("object")
-    df.loc[df["md_score"] <= 0, "opt_rmsd_display"] = pd.NA
+    df.loc[pd.to_numeric(df["md_score"], errors="coerce") <= 0, "opt_rmsd_display"] = pd.NA
 
-    # If the value was computed but opt_rmsd_display is empty, fill it with opt_rmsd
-    mask_fill = (df["md_score"] > 0) & (df["opt_rmsd_display"].isna())
-    df.loc[mask_fill, "opt_rmsd_display"] = df.loc[mask_fill, "opt_rmsd"].round(4)
+    mask_fill = (pd.to_numeric(df["md_score"], errors="coerce") > 0) & (df["opt_rmsd_display"].isna())
+    df.loc[mask_fill, "opt_rmsd_display"] = pd.to_numeric(df.loc[mask_fill, "opt_rmsd"], errors="coerce").round(4)
 
-    # 6) Final save (master results: all candidates)
+    # ======================================================
+    # Step 6) Final save (master output for all candidates)
+    # ======================================================
     final_path = os.path.join(result_dir, "Final_AutoPipeline.csv")
     df.to_csv(final_path, index=False)
 
-    # 7) Save screening_report (top-10 summary based on Final_AutoPipeline)
+    # ======================================================
+    # Step 7) screening_report (top-10 summary)
+    # ======================================================
     try:
         report_cols = [
             "Compound_Name", "SMILES",
@@ -147,16 +217,10 @@ def main():
             "vina_norm", "cnn_norm", "tox_norm",
             "composite_score",
             "opt_rmsd_display", "md_score",
-            "best_pose"
+            "best_pose",
         ]
 
-        df_report = (
-            df.sort_values("composite_score", ascending=False)
-              .head(10)
-              .copy()
-        )
-
-        # Avoid column-name discrepancies across environments
+        df_report = df.sort_values("composite_score", ascending=False).head(10).copy()
         report_cols = [c for c in report_cols if c in df_report.columns]
 
         report_path = os.path.join(result_dir, "screening_report.csv")
@@ -164,7 +228,7 @@ def main():
 
         print(f"✅ Screening report saved (top 10): {report_path}")
     except Exception as e:
-        print(f"⚠️ screening_report save failed: {e}")
+        print(f"⚠️ Failed to save screening_report: {e}")
 
     # Completion flag
     with open(os.path.join(result_dir, "run_completed.flag"), "w") as f:
