@@ -1,0 +1,9 @@
+name: hyperscreen
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - rdkit
+  - pip
+  - pip:
+      - -r requirements.txt

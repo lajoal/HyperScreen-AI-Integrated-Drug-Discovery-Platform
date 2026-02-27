@@ -1,0 +1,7 @@
+streamlit>=1.35
+pandas>=2.0
+numpy>=1.24
+requests>=2.31
+streamlit-molstar>=0.3
+pillow
+# RDKit is recommended via conda-forge (see README)

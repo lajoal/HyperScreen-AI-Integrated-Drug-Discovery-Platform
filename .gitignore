@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Streamlit
+.streamlit/
+
+# Data / outputs
+data/
+*.db
+*.sqlite
+*.csv
+*.pdb
+*.pdbqt
+*.sdf
+*.mol2
+*.log
+*_tmp_view/
+
+# OS
+.DS_Store
+Thumbs.db
