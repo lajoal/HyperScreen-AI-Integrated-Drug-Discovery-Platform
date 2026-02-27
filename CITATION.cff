@@ -4,7 +4,7 @@ message: "If you use this software, please cite it as below."
 type: software
 authors:
   - family-names: "Lee"
-    given-names: "Jongwook"
+    given-names: "Jong UK"
 version: 0.1.0
 date-released: 2026-02-27
 license: MIT
